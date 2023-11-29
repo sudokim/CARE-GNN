@@ -23,6 +23,9 @@ def load_data_new(data):
     if data == "":
         pass
 
+    raise NotImplementedError
+    # return homo, [relation1, relation2, ...], feat_data, labels
+
 
 def load_data(data):
     """
