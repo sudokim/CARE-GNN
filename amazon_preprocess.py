@@ -8,17 +8,8 @@ from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-from sklearn.linear_model import LogisticRegression
-import sklearn.neural_network as nn
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    precision_recall_fscore_support,
-    accuracy_score,
-    f1_score,
-    recall_score,
-)
+from transformers import DistilBertTokenizer, DistilBertModel
+
 # import xgboost as xgb
 
 # from run_ours import pos_neg_split, undersample
@@ -49,7 +40,8 @@ def date_diff(t1, t2):
     return abs((date1 - date2).days)
 
 
-def star_judge(reviews1, reviews2):
+def has_overlapping_star(reviews1, reviews2):
+    # reviews: [(star, time), ...)]
     flag = False
     for r1 in reviews1:
         for r2 in reviews2:
@@ -59,7 +51,7 @@ def star_judge(reviews1, reviews2):
     return flag
 
 
-def time_judge(reviews1, reviews2, diff=7):
+def has_similar_time(reviews1, reviews2, diff=7):
     flag = False
     for r1 in reviews1:
         for r2 in reviews2:
@@ -172,59 +164,119 @@ def sentiment(new_reviews):
     return nltk_results
 
 
-def build_graph(new_reviews):
+def build_graph(new_reviews, type):
     user_adj = sp.lil_matrix((len(new_reviews), len(new_reviews)))
 
     # user-product-user
-    products = {u: [review["asin"] for review in reviews] for u, reviews in new_reviews.items()}
-    for i1, u1 in enumerate(new_reviews):
-        # print(i1)
-        for i2, u2 in enumerate(new_reviews):
-            if u1 != u2 and len(list(set(products[u1]) & set(products[u2]))) >= 1:
-                user_adj[i1, i2] = 1
-                user_adj[i2, i1] = 1
+    if type == "upu":
+        products = {u: [review["asin"] for review in reviews] for u, reviews in new_reviews.items()}
+        for i1, u1 in enumerate(new_reviews):
+            # print(i1)
+            for i2, u2 in enumerate(new_reviews):
+                if u1 != u2 and len(list(set(products[u1]) & set(products[u2]))) >= 1:
+                    user_adj[i1, i2] = 1
+                    user_adj[i2, i1] = 1
 
-    # # user-star&time-user
-    # rating_time = {user: [(review['overall'], review['unixReviewTime']) for review in reviews] for user, reviews in new_reviews.items()}
-    #
-    # for i1, u1 in enumerate(new_reviews):
-    # 	print(i1)
-    # 	for i2, u2 in enumerate(new_reviews):
-    # 		if u1 != u2 and star_judge(rating_time[u1], rating_time[u2]) and time_judge(rating_time[u1], rating_time[u2]):
-    # 			user_adj[i1, i2] = 1
-    # 			user_adj[i2, i1] = 1
+    # user-star&time-user
+    elif type == "usu":
+        rating_time = {
+            user: [(review["overall"], review["unixReviewTime"]) for review in reviews]
+            for user, reviews in new_reviews.items()
+        }
 
-    # # user-textsim_user
-    # user_text = {user: ' '.join([review['reviewText'] for review in reviews]) for user, reviews in new_reviews.items()}
-    #
-    # all_text = list(user_text.values())
-    # vect = TfidfVectorizer(min_df=1, stop_words="english")
-    # tfidf = vect.fit_transform(all_text)
-    # simi = tfidf * tfidf.T
-    # simi_arr = simi.toarray()
-    # np.fill_diagonal(simi_arr, 0)
-    # flat_arr = simi_arr.flatten()
-    # flat_arr.sort()
-    # threshold = flat_arr[int(flat_arr.size*0.95)]
-    # print(threshold)
-    #
-    # for i1, u1 in enumerate(new_reviews):
-    # 	print(i1)
-    # 	for i2, u2 in enumerate(new_reviews):
-    # 		if u1 != u2 and simi_arr[i1, i2] >= threshold:
-    # 			user_adj[i1, i2] = 1
-    # 			user_adj[i2, i1] = 1
+        count = 0
+        new_reviews_keys = list(new_reviews.keys())
+        for i1, u1 in enumerate(new_reviews_keys):
+            print(i1)
+            for i2, u2 in enumerate(new_reviews_keys[i1 + 1 :]):
+                if (
+                    u1 != u2
+                    and has_overlapping_star(rating_time[u1], rating_time[u2])
+                    and has_similar_time(rating_time[u1], rating_time[u2])
+                ):
+                    count += 1
+                    user_adj[i1, i2] = 1
+                    user_adj[i2, i1] = 1
+        print("Count: ", count)
 
-    # user-product-star-user
-    # products = {u: [review['asin'] for review in reviews] for u, reviews in new_reviews.items()}
-    # rating_time = {user: [(review['overall'], review['unixReviewTime']) for review in reviews] for user, reviews in
-    # 			   new_reviews.items()}
-    # for i1, u1 in enumerate(new_reviews):
-    # 	print(i1)
-    # 	for i2, u2 in enumerate(new_reviews):
-    # 		if u1 != u2 and len(list(set(products[u1]) & set(products[u2]))) >= 1 and star_judge(rating_time[u1], rating_time[u2]):
-    # 			user_adj[i1, i2] = 1
-    # 			user_adj[i2, i1] = 1
+    # user-textsim_user
+    elif type == "uvu":
+        user_text = {
+            user: " ".join([review["reviewText"] for review in reviews]) for user, reviews in new_reviews.items()
+        }
+
+        all_text = list(user_text.values())
+        vect = TfidfVectorizer(min_df=1, stop_words="english")
+        tfidf = vect.fit_transform(all_text)
+        simi = tfidf * tfidf.T
+        simi_arr = simi.toarray()
+        np.fill_diagonal(simi_arr, 0)
+        flat_arr = simi_arr.flatten()
+        flat_arr.sort()
+        threshold = flat_arr[int(flat_arr.size * 0.95)]
+        print(threshold)
+
+        for i1, u1 in enumerate(new_reviews):
+            print(i1)
+            for i2, u2 in enumerate(new_reviews):
+                if u1 != u2 and simi_arr[i1, i2] >= threshold:
+                    user_adj[i1, i2] = 1
+                    user_adj[i2, i1] = 1
+
+        # user - product - star - user
+        # products = {u: [review["asin"] for review in reviews] for u, reviews in new_reviews.items()}
+        # rating_time = {
+        #     user: [(review["overall"], review["unixReviewTime"]) for review in reviews]
+        #     for user, reviews in new_reviews.items()
+        # }
+        # for i1, u1 in enumerate(new_reviews):
+        #     print(i1)
+        #     for i2, u2 in enumerate(new_reviews):
+        #         if (
+        #             u1 != u2
+        #             and len(list(set(products[u1]) & set(products[u2]))) >= 1
+        #             and has_overlapping_star(rating_time[u1], rating_time[u2])
+        #         ):
+        #             user_adj[i1, i2] = 1
+        #             user_adj[i2, i1] = 1
+
+    elif type == "ubu":
+        user_text = {
+            user: [review["reviewText"] for review in reviews] for user, reviews in new_reviews.items()
+        }
+
+        model = DistilBertModel.from_pretrained("distilbert-base-cased").to("cuda")
+        tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-cased")
+
+        def encode(review_texts: list[str]):
+            vectors = []
+            for text in review_texts:
+                inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to("cuda")
+                outputs = model(**inputs)
+                vectors.append(outputs[0][0, 0].detach().cpu().numpy())
+
+            vector = np.mean(vectors, axis=0)
+            # L2 normalization
+            vector = vector / np.linalg.norm(vector)
+            
+            return vector
+
+        user_bert = {
+            user: encode(reviews) for user, reviews in user_text.items()
+        }
+
+        new_reviews_keys = list(new_reviews.keys())
+
+        # Similar if cossim > 0.8
+        for i1, u1 in enumerate(new_reviews_keys):
+            print(i1)
+            for i2, u2 in enumerate(new_reviews_keys[i1 + 1 :]):
+                if u1 != u2 and np.dot(user_bert[u1], user_bert[u2]) > 0.8:
+                    user_adj[i1, i2] = 1
+                    user_adj[i2, i1] = 1
+ 
+    else:
+        raise ValueError("Invalid type")
 
     return user_adj
 
@@ -279,12 +331,13 @@ def build_features(new_reviews):
 
 
 if __name__ == "__main__":
-    reviews = getdict('reviews_Musical_Instruments.json.gz')
+    try:
+        reviews = pickle.load(open("musical_reviews.pickle", "rb"))
+    except:
+        reviews = getdict("reviews_Musical_Instruments.json.gz")
+        pickle.dump(reviews, open("musical_reviews.pickle", "wb"))
 
-    pickle.dump(reviews, open('musical_reviews.pickle', 'wb'))
-
-    with open("musical_reviews.pickle", "rb") as file:
-        all_reviews = pickle.load(file)
+    all_reviews = reviews
 
     # create ground truth
     user_labels = []
@@ -292,9 +345,9 @@ if __name__ == "__main__":
     for u, total in all_reviews.items():
         # print([single[2][0] for single in total])
         # print([single[2][1] for single in total])
-        helpful, votes = sum([single["helpful"][0] for single in total]), sum(
-            [single["helpful"][1] for single in total]
-        )
+        helpful = sum([single["helpful"][0] for single in total])
+        votes = sum([single["helpful"][1] for single in total])
+
         if votes >= 20:
             if helpful / votes > 0.8:
                 labeled_reviews[u] = total
@@ -311,26 +364,24 @@ if __name__ == "__main__":
 
     sampled_reviews = {user: all_reviews[user] for user in sampled_users}
 
-    new_reviews = {**sampled_reviews, **labeled_reviews}
+    new_reviews = labeled_reviews.copy()
+    for u, t in sampled_reviews.items():
+        if u in new_reviews:
+            continue
+            
+        new_reviews[u] = t
+        user_labels.append(-100)
 
-    # build relation graph
-    user_adj = build_graph(new_reviews)
-    sp.save_npz('amazon_instruments_adj.npz', user_adj.tocsr())
+    user_labels = np.array(user_labels)
+    print(len(user_labels))
+    with open("amazon_instruments_labels.pkl", "wb") as f:
+        pickle.dump(user_labels, f)
+
+    sp.save_npz("amazon_instruments_user_product_user", build_graph(new_reviews, "upu").tocsr())
+    sp.save_npz("amazon_instruments_user_star_time_user", build_graph(new_reviews, "usu").tocsr())
+    sp.save_npz("amazon_instruments_user_tfidf_user", build_graph(new_reviews, "uvu").tocsr())
+    sp.save_npz("amazon_instruments_user_bert_user.npz", build_graph(new_reviews, "ubu").tocsr())
+
     # construct feature vectors
     features = build_features(new_reviews)
-    sp.save_npz('amazon_instruments_features.npz', features.tocsr())
-
-    # features = sp.load_npz("Amazon_Dataset/amz_features_36.npz")
-    # features = features.toarray()
-
-    # filter polluted features
-    # new_features = features[:, :19]
-    # new_features = np.hstack([new_features, features[:, 30:]])
-    # sp.save_npz('amz_features_25.npz', sp.csr_matrix(new_features))
-    # exit()
-    # labeled_features = new_features[len(sampled_users) :]
-    user_labels = np.array(user_labels)
-    with open('amazon_instruments_labels.pkl', 'wb') as f:
-    	pickle.dump(user_labels, f)
-    # f.close()
-    # exit()
+    sp.save_npz("amazon_instruments_features.npz", features.tocsr())
