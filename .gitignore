@@ -5,3 +5,6 @@
 .idea/dictionaries
 *.mat
 backup.py
+data/
+*.ipynb
+**/__pycache__/
